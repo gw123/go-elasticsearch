@@ -117,7 +117,8 @@ func (c *Client) Perform(req *http.Request) (*http.Response, error) {
 		res *http.Response
 		err error
 
-		dupReqBodyForLog io.ReadCloser
+		dupReqBodyForLog   io.ReadCloser
+		dupReqBodyForRetry io.ReadCloser
 	)
 
 	// Update request
@@ -125,6 +126,7 @@ func (c *Client) Perform(req *http.Request) (*http.Response, error) {
 	c.setReqUserAgent(req)
 
 	for i := 1; i <= c.maxRetries; i++ {
+		fmt.Println("Perform: attempt", i)
 		var (
 			nodeURL     *url.URL
 			shouldRetry bool
@@ -143,10 +145,26 @@ func (c *Client) Perform(req *http.Request) (*http.Response, error) {
 		c.setReqURL(nodeURL, req)
 		c.setReqAuth(nodeURL, req)
 
-		// Duplicate request body for logger
-		//
-		if c.logger != nil && c.logger.RequestBodyEnabled() {
-			if req.Body != nil && req.Body != http.NoBody {
+		if req.Body != nil && req.Body != http.NoBody {
+			// Duplicate request body for retry
+			//
+			if !c.disableRetry {
+				if req.GetBody != nil {
+					fmt.Println("Perform: Using req.GetBody()")
+					if dupReqBodyForRetry, err = req.GetBody(); err != nil {
+						return nil, fmt.Errorf("cannot duplicate request body: %s", err)
+					}
+					req.Body = dupReqBodyForRetry
+				} else {
+					if dupReqBodyForRetry, req.Body, err = duplicateBody(req.Body); err != nil {
+						return nil, fmt.Errorf("cannot duplicate request body: %s", err)
+					}
+				}
+			}
+
+			// Duplicate request body for logger
+			//
+			if c.logger != nil && c.logger.RequestBodyEnabled() {
 				dupReqBodyForLog, req.Body, _ = duplicateBody(req.Body)
 			}
 		}
@@ -156,6 +174,14 @@ func (c *Client) Perform(req *http.Request) (*http.Response, error) {
 		start := time.Now().UTC()
 		res, err = c.transport.RoundTrip(req)
 		dur := time.Since(start)
+
+		// Reset the request body for a retry
+		//
+		if req.Body != nil && req.Body != http.NoBody {
+			if !c.disableRetry {
+				req.Body = dupReqBodyForRetry
+			}
+		}
 
 		// Log request and response
 		//
@@ -264,15 +290,28 @@ func (c *Client) logRoundTrip(
 	start time.Time,
 	dur time.Duration,
 ) {
-	var dupRes http.Response
+	var (
+		dupRes http.Response
+		dupReq http.Request
+	)
+	if req != nil {
+		dupReq = *req
+	}
 	if res != nil {
 		dupRes = *res
 	}
 	if c.logger.RequestBodyEnabled() {
-		if req.Body != nil && req.Body != http.NoBody {
-			req.Body = ioutil.NopCloser(reqBody)
+		if req != nil && req.Body != nil && req.Body != http.NoBody {
+			b1, b2, _ := duplicateBody(req.Body)
+			dupReq.Body = b1
+			req.Body = b2
 		}
 	}
+	// if c.logger.RequestBodyEnabled() {
+	// 	if req.Body != nil && req.Body != http.NoBody {
+	// 		req.Body = ioutil.NopCloser(reqBody)
+	// 	}
+	// }
 	if c.logger.ResponseBodyEnabled() {
 		if res != nil && res.Body != nil && res.Body != http.NoBody {
 			b1, b2, _ := duplicateBody(res.Body)
@@ -280,7 +319,8 @@ func (c *Client) logRoundTrip(
 			res.Body = b2
 		}
 	}
-	c.logger.LogRoundTrip(req, &dupRes, err, start, dur) // errcheck exclude
+	_ = dupReq
+	c.logger.LogRoundTrip(&dupReq, &dupRes, err, start, dur) // errcheck exclude
 }
 
 func initUserAgent() string {
@@ -304,4 +344,19 @@ func initUserAgent() string {
 	b.WriteRune(')')
 
 	return b.String()
+}
+
+func duplicateBody(body io.ReadCloser) (io.ReadCloser, io.ReadCloser, error) {
+	var (
+		b1 bytes.Buffer
+		b2 bytes.Buffer
+		tr = io.TeeReader(body, &b2)
+	)
+	_, err := b1.ReadFrom(tr)
+	if err != nil {
+		return ioutil.NopCloser(io.MultiReader(&b1, errorReader{err: err})), ioutil.NopCloser(io.MultiReader(&b2, errorReader{err: err})), err
+	}
+	defer func() { body.Close() }()
+
+	return ioutil.NopCloser(&b1), ioutil.NopCloser(&b2), nil
 }

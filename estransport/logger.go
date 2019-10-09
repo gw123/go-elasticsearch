@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -136,6 +135,7 @@ func (l *ColorLogger) LogRoundTrip(req *http.Request, res *http.Response, err er
 	if l.RequestBodyEnabled() && req != nil && req.Body != nil && req.Body != http.NoBody {
 		var buf bytes.Buffer
 		if req.GetBody != nil {
+			fmt.Println("Logger: Using req.GetBody()")
 			b, _ := req.GetBody()
 			buf.ReadFrom(b)
 		} else {
@@ -379,21 +379,6 @@ func logBodyAsText(dst io.Writer, body io.Reader, prefix string) {
 			fmt.Fprintf(dst, "%s %s\n", prefix, s)
 		}
 	}
-}
-
-func duplicateBody(body io.ReadCloser) (io.ReadCloser, io.ReadCloser, error) {
-	var (
-		b1 bytes.Buffer
-		b2 bytes.Buffer
-		tr = io.TeeReader(body, &b2)
-	)
-	_, err := b1.ReadFrom(tr)
-	if err != nil {
-		return ioutil.NopCloser(io.MultiReader(&b1, errorReader{err: err})), ioutil.NopCloser(io.MultiReader(&b2, errorReader{err: err})), err
-	}
-	defer func() { body.Close() }()
-
-	return ioutil.NopCloser(&b1), ioutil.NopCloser(&b2), nil
 }
 
 func resStatusCode(res *http.Response) int {

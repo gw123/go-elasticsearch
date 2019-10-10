@@ -70,9 +70,10 @@ type Client struct {
 	maxRetries           int
 	retryBackoff         func(attempt int) time.Duration
 
-	transport http.RoundTripper
-	selector  Selector
-	logger    Logger
+	transport   http.RoundTripper
+	connections ConnectionPool
+	selector    Selector
+	logger      Logger
 }
 
 // New creates new HTTP client.
@@ -92,6 +93,11 @@ func New(cfg Config) *Client {
 		cfg.MaxRetries = defaultMaxRetries
 	}
 
+	var conns []*Connection
+	for _, u := range cfg.URLs {
+		conns = append(conns, &Connection{URL: u})
+	}
+
 	return &Client{
 		urls:     cfg.URLs,
 		username: cfg.Username,
@@ -104,9 +110,10 @@ func New(cfg Config) *Client {
 		maxRetries:           cfg.MaxRetries,
 		retryBackoff:         cfg.RetryBackoff,
 
-		transport: cfg.Transport,
-		selector:  NewRoundRobinSelector(cfg.URLs...),
-		logger:    cfg.Logger,
+		transport:   cfg.Transport,
+		selector:    NewRoundRobinSelector(cfg.URLs...),
+		connections: newRoundRobinConnectionPool(conns...),
+		logger:      cfg.Logger,
 	}
 }
 
@@ -222,7 +229,11 @@ func (c *Client) URLs() []*url.URL {
 }
 
 func (c *Client) getURL() (*url.URL, error) {
-	return c.selector.Select()
+	conn, err := c.connections.GetConnection()
+	if err != nil {
+		return nil, err
+	}
+	return conn.URL, nil
 }
 
 func (c *Client) setReqURL(u *url.URL, req *http.Request) *http.Request {
